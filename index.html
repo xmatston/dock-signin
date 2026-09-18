@@ -208,12 +208,28 @@
       // Instead, save to the DockSignIns SharePoint List endpoint
       // For now, log locally and the agent will pick it up
       
-      // Store in sessionStorage for the agent to read
-      var log = JSON.parse(sessionStorage.getItem('scanLog') || '[]');
-      log.push(entry);
-      sessionStorage.setItem('scanLog', JSON.stringify(log));
-
-      document.getElementById('connStatus').innerHTML = '&#x2713; ' + emp.login + ' recorded @ Door ' + currentDoor;
+      // Send to GitHub Issues via sendBeacon
+      var issueTitle = 'SCAN|' + currentDoor + '|' + (currentAction==='signin'?'SI':'SO') + '|' + (currentRole==='wallbuilder'?'WB':'PIT') + '|' + emp.login + '|' + emp.name + '|' + shift + '|' + timeStr + '|' + dateStr;
+      var issueBody = JSON.stringify(entry, null, 2);
+      var ghPayload = JSON.stringify({ title: issueTitle, body: issueBody });
+      
+      fetch('https://api.github.com/repos/xmatston/dock-signin/issues', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer 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',
+          'Content-Type': 'application/json',
+          'Accept': 'application/vnd.github+json'
+        },
+        body: ghPayload
+      }).then(function(r) {
+        if (r.ok) {
+          document.getElementById('connStatus').innerHTML = '&#x2713; ' + emp.login + ' recorded @ Door ' + currentDoor;
+        } else {
+          document.getElementById('connStatus').innerHTML = '&#x2717; Upload failed (' + r.status + ')';
+        }
+      }).catch(function(e) {
+        document.getElementById('connStatus').innerHTML = '&#x2717; Offline — ' + e.message;
+      });
 
       // Reset to badge prompt after 3 seconds
       setTimeout(showBadgePrompt, 3000);
