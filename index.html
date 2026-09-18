@@ -147,7 +147,48 @@
   // Handle badge scan
   function handleBadgeScan(text) {
     text = text.trim();
-    if (!text || !currentDoor) return;
+    if (!text) return;
+    
+    // Check if scanner typed a URL (from URL-encoded QR code)
+    if (text.indexOf('door=') >= 0) {
+      try {
+        var urlParams;
+        if (text.indexOf('?') >= 0) {
+          urlParams = new URLSearchParams(text.substring(text.indexOf('?')));
+        } else {
+          urlParams = new URLSearchParams(text);
+        }
+        var d = urlParams.get('door');
+        var a = urlParams.get('action');
+        var r = urlParams.get('role');
+        if (d) {
+          currentDoor = d;
+          currentAction = (a === 'SO') ? 'signout' : 'signin';
+          currentRole = (r === 'PIT') ? 'pitdriver' : 'wallbuilder';
+          try { document.getElementById('sndBadge').currentTime=0; document.getElementById('sndBadge').play(); } catch(e) {}
+          showBadgePrompt();
+          return;
+        }
+      } catch(e) {}
+    }
+    
+    // Check if scanner typed a door code (e.g. 302-SI-WB)
+    var doorMatch = text.match(/^(\d{3})-(SI|SO)-(WB|PIT)$/);
+    if (doorMatch) {
+      currentDoor = doorMatch[1];
+      currentAction = doorMatch[2] === 'SO' ? 'signout' : 'signin';
+      currentRole = doorMatch[3] === 'PIT' ? 'pitdriver' : 'wallbuilder';
+      try { document.getElementById('sndBadge').currentTime=0; document.getElementById('sndBadge').play(); } catch(e) {}
+      showBadgePrompt();
+      return;
+    }
+    
+    if (!currentDoor) {
+      // No door set yet — show error
+      setDisplay('<div class="error-text">Scan a dock door QR code first</div>');
+      setTimeout(function() { setDisplay('<div class="badge-prompt" style="color:#e74c3c;">No door specified.<br>Scan a QR code to begin.</div>'); }, 3000);
+      return;
+    }
     
     var emp = BADGE_LOOKUP[text];
     if (emp) {
