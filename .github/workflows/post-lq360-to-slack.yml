@@ -11,12 +11,14 @@ jobs:
     
     steps:
       - name: Post to Slack webhook
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          BODY='${{ github.event.issue.body }}'
+          PAYLOAD=$(jq -n --arg msg "$ISSUE_BODY" '{"message": $msg}')
           curl -s -X POST \
             "https://hooks.slack.com/triggers/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" \
             -H "Content-Type: application/json" \
-            -d "{\"message\": \"$(echo "$BODY" | sed 's/"/\\"/g' | tr '\n' ' ')\"}"
+            -d "$PAYLOAD"
       
       - name: Close the issue
         run: |
