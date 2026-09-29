@@ -1,0 +1,27 @@
+name: Post LQ360 Investigation to Slack
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  post-to-slack:
+    runs-on: ubuntu-latest
+    if: startsWith(github.event.issue.title, 'LQ360|')
+    
+    steps:
+      - name: Post to Slack webhook
+        run: |
+          BODY='${{ github.event.issue.body }}'
+          curl -s -X POST \
+            "https://hooks.slack.com/triggers/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" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"$(echo "$BODY" | sed 's/"/\\"/g' | tr '\n' ' ')\"}"
+      
+      - name: Close the issue
+        run: |
+          curl -s -X PATCH \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"state": "closed"}'
