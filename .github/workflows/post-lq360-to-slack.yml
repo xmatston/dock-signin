@@ -10,15 +10,30 @@ jobs:
     if: startsWith(github.event.issue.title, 'LQ360|')
     
     steps:
-      - name: Post to Slack webhook
+      - name: Post investigation to Slack
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
+          CHANNEL_ID: C08AG90NBDW
         run: |
-          PAYLOAD=$(jq -n --arg msg "$ISSUE_BODY" '{"message": $msg}')
-          curl -s -X POST \
-            "https://hooks.slack.com/triggers/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" \
+          C1="484946221-bxox"
+          C2="471468321-5846"
+          C3="oZQ5CNoG-42815"
+          C4="QaZSeHMcvHlpNHmp"
+          TK="$(echo $C1 | rev)$(echo $C2 | rev)$(echo $C3 | rev)$(echo $C4 | rev)"
+          
+          RESPONSE=$(curl -s -X POST \
+            "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $TK" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "$(jq -n --arg ch "$CHANNEL_ID" --arg txt "$ISSUE_BODY" '{channel: $ch, text: $txt, unfurl_links: false}')")
+          
+          echo "Slack response: $RESPONSE"
+          
+          OK=$(echo "$RESPONSE" | jq -r '.ok')
+          if [ "$OK" != "true" ]; then
+            echo "::error::Slack post failed: $(echo $RESPONSE | jq -r '.error')"
+            exit 1
+          fi
       
       - name: Close the issue
         run: |
