@@ -1,0 +1,150 @@
+name: LQ360 Cloud Investigation Poster
+
+# Runs every 5 minutes in GitHub's cloud — no laptop required.
+# Reads #geu3-lq360-alerts, detects NEW "Load Quality Defect Created" alerts,
+# compiles an investigation skeleton + accept/dispute bridge checklist, and posts
+# it to the channel AS THE "GEU3 LQ360 Investigation" app (bot token chat.postMessage).
+#
+# SECURITY: the Slack bot token is read from an encrypted GitHub Actions Secret
+# (secrets.SLACK_BOT_TOKEN). It is NEVER written into source — this avoids
+# GitHub secret-scanning auto-revocation and keeps the credential safe.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'     # every 5 minutes (UTC)
+  workflow_dispatch: {}         # allow manual run from the Actions tab
+
+concurrency:
+  group: lq360-poster
+  cancel-in-progress: false
+
+permissions:
+  contents: write               # to commit the dedup state file back
+
+jobs:
+  poll-and-post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Poll LQ360 and post investigations
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CHANNEL_ID: C08AG90NBDW
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
+            echo "::error::SLACK_BOT_TOKEN secret is not set. Add it in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          STATE_FILE="lq360_state.json"
+          if [ ! -f "$STATE_FILE" ]; then echo '{"processed_ts":[],"last_poll":""}' > "$STATE_FILE"; fi
+
+          # --- Read last 50 messages from the channel (server-side, no CORS) ---
+          HIST=$(curl -s -G "https://slack.com/api/conversations.history" \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            --data-urlencode "channel=$CHANNEL_ID" \
+            --data-urlencode "limit=50")
+
+          OK=$(echo "$HIST" | jq -r '.ok')
+          if [ "$OK" != "true" ]; then
+            ERR=$(echo "$HIST" | jq -r '.error')
+            echo "::error::conversations.history failed: $ERR"
+            if [ "$ERR" = "not_in_channel" ]; then
+              echo "Fix: in Slack, run  /invite @GEU3 LQ360 Investigation  in #geu3-lq360-alerts"
+            elif [ "$ERR" = "missing_scope" ]; then
+              echo "Fix: add channels:history + channels:read scopes to the app and reinstall. Needed=$(echo "$HIST" | jq -r '.needed')"
+            fi
+            exit 1
+          fi
+
+          echo "Read OK. Scanning messages for new defect-created alerts..."
+
+          # --- Iterate messages oldest-first so threads post in order ---
+          echo "$HIST" | jq -c '.messages | reverse | .[]' | while read -r msg; do
+            TS=$(echo "$msg" | jq -r '.ts')
+            TEXT=$(echo "$msg" | jq -r '.text // ""')
+
+            echo "$TEXT" | grep -qi "Load Quality Defect Created" || continue
+            echo "$TEXT" | grep -qi "Assigned" || continue
+            if jq -e --arg ts "$TS" '.processed_ts | index($ts)' "$STATE_FILE" >/dev/null; then continue; fi
+
+            # --- Parse fields (best-effort) ---
+            VRID=$(echo "$TEXT" | grep -oiE "VRID[^A-Z0-9]*[A-Z0-9]{8,}" | head -1 | grep -oiE "[A-Z0-9]{8,}$" || echo "")
+            DD=$(echo "$TEXT" | grep -oiE "DD[[:space:]]*[0-9]+" | head -1 | grep -oE "[0-9]+" | head -1 || echo "")
+            TYPE=$(echo "$TEXT" | grep -oiE "Type:[^A-Za-z]*[A-Za-z ]+" | head -1 | sed -E 's/.*Type:[[:space:]]*//I' || echo "")
+            SUBTYPE=$(echo "$TEXT" | grep -oiE "Sub-?Type:[^A-Za-z]*[A-Za-z /-]+" | head -1 | sed -E 's/.*Type:[[:space:]]*//I' || echo "")
+            LPN=$(echo "$TEXT" | grep -oiE "LPN:[^A-Z0-9]*[A-Z0-9]+" | head -1 | sed -E 's/.*LPN:[[:space:]]*//I' || echo "")
+            SEQ=$(echo "$TEXT" | grep -oiE "Sequence:[^A-Za-z0-9]*[A-Za-z0-9>_-]+" | head -1 | sed -E 's/.*Sequence:[[:space:]]*//I' || echo "")
+
+            # --- Door resolution (LQ360 DD conversion, flagged unverified) ---
+            DOOR="$DD"; SRC="from LQ360 DD conversion — unverified"
+            if [ -n "$DD" ]; then
+              LEN=${#DD}
+              if   [ "$LEN" -eq 3 ] && [[ "$DD" == 3* ]]; then DOOR="$DD"
+              elif [ "$LEN" -le 2 ]; then DOOR="3$DD"
+              elif [ "$LEN" -eq 3 ]; then DOOR="3${DD:1:2}"; fi
+            fi
+            [ -z "$DOOR" ] && DOOR="UNKNOWN"
+            [ -z "$VRID" ] && VRID="UNKNOWN"
+
+            INV=$(cat <<EOF
+LQ360 Investigation — Door ${DOOR} — ${VRID}
+Defect: ${TYPE} - ${SUBTYPE}
+Sequence: ${SEQ}
+LPN: ${LPN}
+
+TIMELINE
+Start: N/A — Check YMS https://trans-logistics.amazon.com/yms/eventHistory (search LPN: ${LPN})
+Complete: N/A — Check YMS
+Downstream Arrival: N/A — Check YMS
+
+DOOR RESOLUTION
+Door: ${DOOR} (${SRC})
+
+AUDIT STATUS
+Poke Test: N/A — Check Apollo https://apollo-audit.corp.amazon.com/reporting/results_by_audit?audit_type_id=27156
+OB Inspect Audit: N/A — Check Apollo https://apollo-audit.corp.amazon.com/reporting/results_by_audit?audit_type_id=29405
+TDR Release PIC: N/A — Check YMS for releasing user
+GTDR Vehicle History: https://www.amazonlogistics.com/gtdr/dashboard/vehicle_history?vrid=${VRID}
+
+WALL BUILDER ACCOUNTABILITY
+WB AAs: Check Wall_Builder_Tracker.xlsx (WB Sign-In Log) for door ${DOOR}
+Wall Audit Feedback: Check #geu3-fill-rate-utilization
+Fill Rate Audit: Check #geu3-fill-rate-utilization
+
+MANAGER ACTION REQUIRED — Bridge this defect (Accept or Dispute) with rationale:
+• Start/Complete/Arrival times (from YMS)
+• Poke Test and OB Inspect counts (from Apollo)
+• WB AA accountability (from tracker)
+• Fill Rate audit results
+• Decision rationale and corrective actions
+EOF
+)
+
+            RESP=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg ch "$CHANNEL_ID" --arg txt "$INV" --arg ts "$TS" \
+                   '{channel:$ch, text:$txt, thread_ts:$ts, unfurl_links:false}')")
+
+            if [ "$(echo "$RESP" | jq -r '.ok')" = "true" ]; then
+              echo "Posted investigation for ts=$TS (door $DOOR, vrid $VRID)"
+              jq --arg ts "$TS" '.processed_ts += [$ts]' "$STATE_FILE" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+            else
+              echo "::warning::post failed for ts=$TS: $(echo "$RESP" | jq -r '.error')"
+            fi
+          done
+
+          jq '.last_poll=(now|todate) | .processed_ts=(.processed_ts[-200:])' "$STATE_FILE" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+
+      - name: Commit state
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add lq360_state.json
+          git commit -m "chore: update LQ360 poll state [skip ci]" || echo "no changes"
+          git push || echo "push skipped"
